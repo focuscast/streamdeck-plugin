@@ -1,0 +1,51 @@
+{
+  "Name": "focuscast",
+  "Version": "0.1.0.0",
+  "Author": "Matteo Gassend",
+  "Actions": [
+    {
+      "Name": "Toggle",
+      "UUID": "live.focuscast.streamdeck.toggle",
+      "Icon": "imgs/actions/counter/icon",
+      "Tooltip": "Toggles a focuscast mapping",
+      "PropertyInspectorPath": "ui/toggle-mapping.html",
+      "Controllers": [
+        "Keypad"
+      ],
+      "States": [
+        {
+          "Image": "imgs/actions/counter/key",
+          "TitleAlignment": "middle"
+        },
+        {
+          "Image": "imgs/actions/counter/key",
+          "TitleAlignment": "middle"
+        }
+      ]
+    }
+  ],
+  "Category": "focuscast",
+  "CategoryIcon": "imgs/plugin/category-icon",
+  "CodePath": "bin/plugin.js",
+  "Description": "streamdeck integration for focuscast",
+  "Icon": "imgs/plugin/marketplace",
+  "SDKVersion": 3,
+  "Software": {
+    "MinimumVersion": "6.9"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "UUID": "live.focuscast.streamdeck"
+}

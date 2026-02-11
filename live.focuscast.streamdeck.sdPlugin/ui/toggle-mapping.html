@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html>
+  <head lang="en">
+    <title>Toggle Mapping</title>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        padding: 10px;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        color: #f2f2f2;
+      }
+
+      .row {
+        margin-bottom: 10px;
+      }
+
+      label {
+        display: block;
+        margin-bottom: 4px;
+        font-size: 12px;
+        color: #d4d4d4;
+      }
+
+      input,
+      select,
+      button {
+        width: 100%;
+        box-sizing: border-box;
+        border: 1px solid #4f4f4f;
+        border-radius: 6px;
+        background: #232323;
+        color: #f2f2f2;
+        font-size: 12px;
+        min-height: 30px;
+        padding: 6px 8px;
+      }
+
+      input:focus,
+      select:focus,
+      button:focus {
+        outline: none;
+        border-color: #6d8cff;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      button:disabled,
+      select:disabled,
+      input:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      #status {
+        margin-top: 8px;
+        font-size: 12px;
+        color: #b5b5b5;
+        line-height: 1.3;
+      }
+
+      #status.error {
+        color: #ff8f8f;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="row">
+      <label for="focuscastPath">Focuscast Path</label>
+      <input
+        id="focuscastPath"
+        type="text"
+        placeholder="focuscast (or full path)"
+      />
+    </div>
+
+    <div class="row">
+      <label for="sceneSelect">Scene</label>
+      <select id="sceneSelect" disabled></select>
+    </div>
+
+    <div class="row">
+      <label for="appSelect">App</label>
+      <select id="appSelect" disabled></select>
+    </div>
+
+    <div class="row">
+      <button id="refreshButton" type="button">Reload Mappings</button>
+    </div>
+
+    <div id="status"></div>
+
+    <script>
+      let websocket;
+      let registrationUUID;
+      let actionUUID = "live.focuscast.streamdeck.toggle";
+      let actionContext;
+      let settings = {};
+      let mappings = [];
+      let pendingRequestTimer = null;
+
+      const focuscastPathInput = document.getElementById("focuscastPath");
+      const sceneSelect = document.getElementById("sceneSelect");
+      const appSelect = document.getElementById("appSelect");
+      const refreshButton = document.getElementById("refreshButton");
+      const statusEl = document.getElementById("status");
+
+      function normalizeText(value) {
+        const trimmed = (value || "").trim();
+        return trimmed || undefined;
+      }
+
+      function normalizedSettings() {
+        return {
+          scene: normalizeText(settings.scene),
+          app: normalizeText(settings.app),
+          focuscastPath: normalizeText(settings.focuscastPath),
+        };
+      }
+
+      function setStatus(text, isError) {
+        statusEl.textContent = text || "";
+        statusEl.classList.toggle("error", !!isError);
+      }
+
+      function stopPendingRequestTimer() {
+        if (pendingRequestTimer) {
+          clearTimeout(pendingRequestTimer);
+          pendingRequestTimer = null;
+        }
+      }
+
+      function setSelectOptions(select, options, placeholder) {
+        select.innerHTML = "";
+
+        const placeholderOption = document.createElement("option");
+        placeholderOption.value = "";
+        placeholderOption.textContent = placeholder;
+        select.appendChild(placeholderOption);
+
+        for (const option of options) {
+          const el = document.createElement("option");
+          el.value = option.value;
+          el.textContent = option.label;
+          select.appendChild(el);
+        }
+
+        select.disabled = options.length === 0;
+      }
+
+      function uniqueSorted(values) {
+        return Array.from(new Set(values)).sort((a, b) => a.localeCompare(b));
+      }
+
+      function sendToPlugin(payload) {
+        if (!websocket || !actionContext) {
+          return;
+        }
+
+        websocket.send(
+          JSON.stringify({
+            event: "sendToPlugin",
+            action: actionUUID,
+            context: actionContext,
+            payload,
+          }),
+        );
+      }
+
+      function persistSettings() {
+        if (!websocket || !actionContext) {
+          return;
+        }
+
+        const payload = normalizedSettings();
+        settings = payload;
+
+        websocket.send(
+          JSON.stringify({
+            event: "setSettings",
+            context: actionContext,
+            payload,
+          }),
+        );
+
+        // Keep plugin-side state in sync immediately.
+        sendToPlugin({
+          type: "updateSettings",
+          settings: payload,
+        });
+      }
+
+      function updateAppOptions(scene, shouldPersist) {
+        const sceneMappings = mappings.filter((mapping) => mapping.scene === scene);
+        const apps = uniqueSorted(sceneMappings.map((mapping) => mapping.app_name));
+
+        setSelectOptions(
+          appSelect,
+          apps.map((app) => {
+            const appMapping = sceneMappings.find((mapping) => mapping.app_name === app);
+            const state = appMapping && appMapping.active ? "ON" : "OFF";
+            return { value: app, label: `${app} (${state})` };
+          }),
+          "Select app",
+        );
+
+        const selectedApp =
+          settings.app && apps.includes(settings.app) ? settings.app : apps[0] || "";
+        appSelect.value = selectedApp;
+        settings.app = selectedApp || undefined;
+
+        if (shouldPersist) {
+          persistSettings();
+        }
+      }
+
+      function updateSceneOptions(shouldPersist) {
+        const scenes = uniqueSorted(mappings.map((mapping) => mapping.scene));
+
+        setSelectOptions(
+          sceneSelect,
+          scenes.map((scene) => ({ value: scene, label: scene })),
+          "Select scene",
+        );
+
+        const selectedScene =
+          settings.scene && scenes.includes(settings.scene)
+            ? settings.scene
+            : scenes[0] || "";
+        sceneSelect.value = selectedScene;
+        settings.scene = selectedScene || undefined;
+
+        updateAppOptions(selectedScene, shouldPersist);
+      }
+
+      function requestMappings() {
+        if (!websocket || !actionContext) {
+          setStatus("Waiting for action context...", true);
+          return;
+        }
+
+        stopPendingRequestTimer();
+        setStatus("Loading mappings...", false);
+
+        pendingRequestTimer = setTimeout(() => {
+          setStatus("No response from plugin.", true);
+          pendingRequestTimer = null;
+        }, 4000);
+
+        sendToPlugin({
+          type: "listMappings",
+          focuscastPath: normalizeText(settings.focuscastPath),
+        });
+      }
+
+      function handleMappingsResult(payload) {
+        stopPendingRequestTimer();
+
+        if (!payload.ok) {
+          mappings = [];
+          updateSceneOptions(false);
+          setStatus(payload.error || "Unable to load mappings.", true);
+          return;
+        }
+
+        mappings = payload.mappings || [];
+        updateSceneOptions(true);
+        setStatus(mappings.length ? "" : "No mappings found.", false);
+      }
+
+      function handleMessage(message) {
+        if (!actionContext && message.context) {
+          actionContext = message.context;
+        }
+
+        if (message.event === "didReceiveSettings") {
+          const payloadSettings = (message.payload && message.payload.settings) || {};
+          settings = {
+            scene: normalizeText(payloadSettings.scene),
+            app: normalizeText(payloadSettings.app),
+            focuscastPath: normalizeText(payloadSettings.focuscastPath),
+          };
+          focuscastPathInput.value = settings.focuscastPath || "";
+          requestMappings();
+          return;
+        }
+
+        if (
+          message.event === "sendToPropertyInspector" &&
+          message.payload &&
+          message.payload.type === "listMappingsResult"
+        ) {
+          handleMappingsResult(message.payload);
+        }
+      }
+
+      sceneSelect.addEventListener("change", () => {
+        settings.scene = normalizeText(sceneSelect.value);
+        settings.app = undefined;
+        updateAppOptions(settings.scene || "", true);
+      });
+
+      appSelect.addEventListener("change", () => {
+        settings.app = normalizeText(appSelect.value);
+        persistSettings();
+      });
+
+      focuscastPathInput.addEventListener("change", () => {
+        settings.focuscastPath = normalizeText(focuscastPathInput.value);
+        persistSettings();
+        requestMappings();
+      });
+
+      refreshButton.addEventListener("click", () => {
+        requestMappings();
+      });
+
+      function connectElgatoStreamDeckSocket(
+        inPort,
+        inUUID,
+        inRegisterEvent,
+        inInfo,
+        inActionInfo,
+      ) {
+        registrationUUID = inUUID;
+        try {
+          const parsed = JSON.parse(inActionInfo || "{}");
+          actionUUID = parsed.action || actionUUID;
+          actionContext = parsed.context;
+        } catch {
+          // Keep defaults.
+        }
+
+        websocket = new WebSocket(`ws://127.0.0.1:${inPort}`);
+
+        websocket.onopen = () => {
+          websocket.send(
+            JSON.stringify({
+              event: inRegisterEvent,
+              uuid: registrationUUID,
+            }),
+          );
+        };
+
+        websocket.onerror = () => {
+          setStatus("WebSocket error.", true);
+        };
+
+        websocket.onclose = () => {
+          setStatus("Connection closed.", true);
+          stopPendingRequestTimer();
+        };
+
+        websocket.onmessage = (event) => {
+          const message = JSON.parse(event.data);
+          handleMessage(message);
+        };
+      }
+    </script>
+  </body>
+</html>
